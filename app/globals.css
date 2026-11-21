@@ -1,0 +1,83 @@
+:root{color-scheme:light;--bg:#E8EBF0;--panel:#FFFFFF;--ink:#0B0B12;--mute:#454B5C;--line:rgba(11,11,18,.2);--edge:#0B0B12;--pop:#FFE14D;--accent:#2D3CFF;--bad:#C20018;--warn:#5C3500;--ok:#006338;--bad-bg:#FFD3D8;--warn-bg:#FFB547;--ok-bg:#B6F2CF}
+*{box-sizing:border-box}
+html{font-size:clamp(17px,calc(.55vw + .55vh + 11px),26px)}
+body{margin:0;height:100vh;height:100dvh;overflow:hidden;display:flex;align-items:center;color:var(--ink);
+  font-family:Archivo,"Helvetica Neue",Arial,system-ui,sans-serif;
+  font-variant-ligatures:none;-webkit-font-smoothing:antialiased;line-height:1.45;
+  background:var(--bg);background-image:linear-gradient(rgba(11,11,18,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(11,11,18,.06) 1px,transparent 1px);background-size:2.4rem 2.4rem}
+a{color:var(--accent)}
+a:focus-visible,summary:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mute{color:var(--mute)}
+.err{color:var(--bad);margin:0 0 .4rem}
+
+/* Layout: landscape = weather over news on the left, transport on the right; portrait = three rows; phones use a wide desktop-style viewport */
+main{width:100%;height:min(100%,70vw);display:grid;gap:clamp(.6rem,1.4vmin,1rem);padding:clamp(.7rem,2vmin,1.5rem);grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);grid-template-rows:auto auto minmax(0,1fr);grid-template-areas:"hd hd" "wx tr" "ap tr"}
+header{grid-area:hd;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:.5rem 1rem;padding:0 .3rem}
+.wx{grid-area:wx}.tr{grid-area:tr}.ap{grid-area:ap}
+/* news, compact (both orientations) */
+.ap .news li{padding:0}
+.ap .news .when{margin-bottom:.2rem;font-size:.85rem}
+.ap .news a{font-size:1rem;line-height:1.3}
+.ap .news .desc{margin-top:.3rem;font-size:.82rem;line-height:1.35}
+.ap .news .meta{margin-top:.25rem;font-size:.68rem}
+@media (orientation:portrait){       /* vertical screen: the weather takes only the height it needs; transport and news share the rest 3:2 */
+  main{height:100%;grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto minmax(0,3fr) minmax(0,2fr);grid-template-areas:"hd" "wx" "tr" "ap"}
+  .p.wx,.p.ap{padding:.55rem .9rem}
+  .wx h2,.ap h2{margin-bottom:.35rem;font-size:.9rem}
+  .wx h2 small,.ap h2 small{font-size:.7rem}
+  /* transport: tighter, so both departure boards fit */
+  .tr .status{display:flex;align-items:baseline;flex-wrap:wrap;gap:0 .7rem;padding:.4rem .9rem;margin-bottom:.6rem}.tr .status b{display:inline;font-size:1.2rem}.tr .status span{font-size:.75rem}
+  .tr .grp{margin-bottom:.8rem}
+  .tr .deps{margin-top:.25rem;font-size:.82rem}.tr .deps li{padding:.12rem 0;line-height:1.2}
+}
+@media (orientation:portrait) and (max-height:1100px){       /* short portrait screens (tablets): squeeze a little more */
+  .ap .news .desc{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+}
+
+h1{margin:0;font-size:clamp(1.1rem,2vmin + .4rem,1.8rem);line-height:1;font-weight:900;letter-spacing:-.02em}
+.clk{display:flex;align-items:center;gap:.6rem}
+#clock{font-size:clamp(2rem,4.2vmin + .5rem,3.4rem);font-weight:500;line-height:1;letter-spacing:0;font-variant-numeric:tabular-nums;font-family:"JetBrains Mono",ui-monospace,monospace;font-weight:700;color:#fff;background:var(--accent);padding:.12em .3em;border:2.5px solid var(--edge);box-shadow:.25rem .25rem 0 var(--edge)}
+button{width:2.5rem;height:2.5rem;border-radius:0;border:2.5px solid var(--edge);background:var(--panel);color:var(--ink);font:inherit;font-size:1.15rem;cursor:pointer;box-shadow:.2rem .2rem 0 var(--edge);display:inline-grid;place-items:center;padding:0}
+button:hover{background:var(--accent);color:#fff}button:active{transform:translate(.15rem,.15rem);box-shadow:none}
+
+.p{display:flex;flex-direction:column;min-width:0;min-height:0;padding:1.1rem 1.3rem;border-radius:0;border:2.5px solid var(--edge);background:var(--panel);box-shadow:.4rem .4rem 0 var(--edge)}
+.p.n{background:var(--pop)}
+.scroll{flex:1;min-height:0;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+h2{margin:0 0 .9rem;padding-bottom:.35rem;border-bottom:2.5px solid var(--edge);font-size:1rem;font-weight:800;display:flex;justify-content:space-between;align-items:baseline;gap:.5rem}
+h2 small{font-weight:400;color:var(--mute);font-size:.78rem}
+h3{margin:0 0 .3rem;font-size:.9rem;font-weight:800;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+
+/* Weather: now, in 4 h and in 8 h on one row */
+.wxrow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem}
+.wxc{display:flex;flex-direction:column;align-items:center;gap:.15rem;padding:.35rem .2rem;border:2px solid var(--edge)}
+.wxc.now{background:var(--accent);color:#fff}.wxc.now .l{color:#fff}
+.wxc .l{font-size:.75rem;color:var(--mute);white-space:nowrap}
+.wxc .v{display:flex;align-items:center;gap:.4rem}
+.wxc .i{font-size:clamp(1.6rem,4.2vmin,2.6rem);line-height:1}
+.wxc b{font-size:clamp(2rem,5.5vmin,3.6rem);font-weight:800;line-height:1;letter-spacing:0}
+
+/* Transport */
+.status{border-radius:0;border:2.5px solid var(--edge);padding:.8rem 1rem;margin-bottom:1.1rem}
+.status b{display:block;font-weight:900;font-size:1.55rem;letter-spacing:0;line-height:1.15}
+.status span{font-size:.85rem;font-weight:500;color:var(--ink)}
+.status.ok{background:var(--ok-bg);color:var(--ok)}.status.warn{background:var(--warn-bg);color:var(--warn)}.status.bad{background:var(--bad-bg);color:var(--bad)}
+.grp{margin-bottom:1.2rem}.grp:last-child{margin-bottom:0}
+.chip{font-size:.75rem;padding:.05rem .5rem;border-radius:0;border:2px solid var(--edge);font-weight:700}
+.chip.ok{background:var(--ok-bg);color:var(--ok)}.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.bad{background:var(--bad-bg);color:var(--bad)}
+details.note{border-left:5px solid var(--edge);padding:.2rem 0 .2rem .8rem;margin:.7rem 0}
+details.note.bad{border-color:var(--bad)}details.note.warn{border-color:var(--warn)}
+details.note summary{cursor:pointer;font-weight:700}
+details.note .body p{margin:.4rem 0}
+.meta{font-size:.8rem;color:var(--mute)}
+.deps{list-style:none;margin:.6rem 0 0;padding:0;font-size:.92rem}
+.deps li{display:grid;grid-template-columns:3.6rem 1fr auto;gap:.5rem;padding:.35rem 0;border-top:1px solid var(--line)}
+.deps time{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;font-weight:700}
+.tag.bad{color:var(--bad);font-weight:500}.tag.warn{color:var(--warn);font-weight:500}
+
+/* News */
+.news{list-style:none;margin:0;padding:0}
+.news li{padding:.9rem 0;border-top:1px solid var(--line)}.news li:first-child{border-top:0;padding-top:0}
+.news a{color:var(--ink);text-decoration:none;font-weight:800;font-size:1.15rem;line-height:1.4}.news a:hover{text-decoration:underline}
+.news .meta{margin-top:.35rem}
+.news .desc{margin-top:.5rem;font-size:.95rem;line-height:1.45;opacity:.85}
+.news .when{margin-bottom:.4rem;font-size:1.05rem;font-weight:700;color:var(--accent)}.news .when.old{color:var(--warn)}   /* amber once a message is over a day old */

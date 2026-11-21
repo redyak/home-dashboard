@@ -1,0 +1,373 @@
+export function initializeDashboard() {
+  let refreshTimer;
+  let clockTimer;
+  // ---- Settings: edit these ----
+  const CFG = {
+    lat: 59.9139, lon: 10.7522,          // Oslo
+    bus: '80E',                          // Ruter bus line
+    busStop: 'Vestskrenten',             // stop to show the bus departures from (empty = same name as the station)
+    busTowards: 'Hausmanns bru',         // only departures whose destination contains this (empty = both directions)
+    busStopId: '',                       // optional, e.g. 'NSR:StopPlace:xxxxx' (skips the lookup)
+    station: 'Holmlia stasjon',          // rail station to watch
+    stationId: '',                       // optional, e.g. 'NSR:StopPlace:xxxxx' (skips lookup)
+    apRss: 'https://www.aftenposten.no/rss/',
+    apSections: ['oslo'],                 // Aftenposten sections to show
+    newsWords: ['Holmlia', 'Vestskrenten', 'Nordåssløyfa', 'Nordre Follo', 'Kolbotn'],   // keep only stories that mention one of these (headline or teaser, case-insensitive)
+    newsCount: 3,                        // headlines to cycle through (newest only)
+    landscapeWidth: 1280, portraitWidth: 720,   // phone viewport width (CSS px) per orientation
+    refreshMin: 4                        // refresh everything every N minutes
+  };
+  
+  const TZ = 'Europe/Oslo';
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fT = d => new Date(d).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit', hourCycle:'h23', timeZone:TZ});
+  const fD = d => new Date(d).toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short', timeZone:TZ});
+  const dayKey = d => new Date(d).toLocaleDateString('sv-SE', {timeZone:TZ});
+  const T = t => (Math.round(t) + '°').replace('-', '−');
+  const ago = d => { const m = Math.round((Date.now() - new Date(d)) / 6e4); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.floor(m / 1440) + ' d ago'; };
+  const when = d => {   // "Today, 21:34" / "Yesterday, 07:44" / "Wed 11 Nov, 07:44"
+    const n = Math.round((Date.parse(dayKey(Date.now())) - Date.parse(dayKey(d))) / 864e5);
+    return (n === 0 ? 'Today' : n === 1 ? 'Yesterday' : fD(d)) + ', ' + fT(d);
+  };
+  const stamp = id => $(id).textContent = 'Updated ' + fT(Date.now());
+  const fail = (id, what, e, ts) => {   // with older content on screen, keep it and flag it in the stamp rather than blanking the panel
+    const box = $(id);
+    if (box.dataset.ok && ts) { $(ts).textContent = 'Update failed, showing ' + fT(+box.dataset.ok) + ' data'; return; }
+    box.innerHTML = `<p class="err">Couldn’t load ${what}.</p><p class="meta">${esc(e.message)}</p>`;
+  };
+  const render = (box, html) => {   // swap a panel's content but keep its scroll position and any notices the viewer collapsed
+    const top = box.scrollTop, shut = new Set([...box.querySelectorAll('details.note:not([open])')].map(d => d.dataset.id));
+    box.innerHTML = html;
+    box.querySelectorAll('details.note').forEach(d => { if (d.dataset.id && shut.has(d.dataset.id)) d.open = false; });
+    box.scrollTop = top;
+  };
+  
+  const fetchT = (u, o = {}, ms = 8000) => {          // fetch that gives up instead of hanging
+    const c = new AbortController(), t = setTimeout(() => c.abort(), ms);
+    return fetch(u, {...o, signal: c.signal}).catch(e => { throw e.name === 'AbortError' ? new Error('timed out') : e; }).finally(() => clearTimeout(t));
+  };
+  const cache = {
+    get: k => { try { return JSON.parse(localStorage.getItem('oslo-dash:' + k)); } catch { return null; } },
+    set: (k, v) => { try { localStorage.setItem('oslo-dash:' + k, JSON.stringify(v)); } catch {} }
+  };
+  
+  // ---- Clock ----
+  function tick() { $('#clock').textContent = fT(Date.now()); $('#date').textContent = new Date().toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'long', timeZone:TZ}); }
+  
+  // ---- Weather (MET Norway, the data behind yr.no) ----
+  function sym(code = '') {
+    const b = code.replace(/_(day|night|polartwilight)$/, ''), night = /_night$/.test(code);
+    const w = b.match(/light|heavy|rain|sleet|snow|showers|and|thunder|clearsky|fair|partlycloudy|cloudy|fog/g) || [b];
+    const label = w.map(x => ({clearsky:'clear sky', partlycloudy:'partly cloudy'}[x] || x)).join(' ');
+    let e = '☁️';
+    if (/thunder/.test(b)) e = '⛈️'; else if (/snow/.test(b)) e = '❄️'; else if (/sleet/.test(b)) e = '🌨️';
+    else if (/rain/.test(b)) e = /showers/.test(b) ? '🌦️' : '🌧️';
+    else if (b === 'clearsky') e = night ? '🌙' : '☀️'; else if (b === 'fair') e = night ? '🌙' : '🌤️';
+    else if (b === 'partlycloudy') e = '⛅'; else if (b === 'fog') e = '🌫️';
+    return [e, label.charAt(0).toUpperCase() + label.slice(1)];
+  }
+  
+  async function loadWeather() {
+    try {
+      const r = await fetchT(`https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${CFG.lat}&lon=${CFG.lon}`);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const ts = (await r.json()).properties.timeseries;
+      const near = ms => ts.reduce((a, x) => Math.abs(new Date(x.time) - ms) < Math.abs(new Date(a.time) - ms) ? x : a);   // the forecast hour closest to that moment
+      const cells = [['Now', ts[0]], ['In 4 h', near(Date.now() + 4 * 36e5)], ['In 8 h', near(Date.now() + 8 * 36e5)]];
+      render($('#wx'), `<div class="wxrow">${cells.map(([label, x], i) => {
+        const s = sym((x.data.next_1_hours || x.data.next_6_hours)?.summary.symbol_code);
+        return `<div class="wxc${i ? '' : ' now'}"><span class="l">${label}${i ? ' · ' + fT(x.time) : ''}</span>
+          <div class="v"><span class="i" title="${esc(s[1])}" aria-hidden="true">${s[0]}</span><b>${T(x.data.instant.details.air_temperature)}</b></div></div>`;
+      }).join('')}</div>`);
+      $('#wx').dataset.ok = Date.now(); stamp('#wx-t');
+    } catch (e) { fail('#wx', 'the forecast', e, '#wx-t'); }
+  }
+  
+  // ---- News ----
+  // Aftenposten doesn't reliably allow direct browser requests (CORS),
+  // so its feed is tried through several routes until one returns headlines
+  // (the first, /api/rss, is the Vercel function; the rest are fallbacks for other hosting).
+  const PROXIES = [
+    u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+    u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+    u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u)
+  ];
+  const timed = async (u, kind) => { const r = await fetchT(u, {}, 7000); if (!r.ok) throw new Error('HTTP ' + r.status); return r[kind](); };
+  const getJSON = u => timed(u, 'json');
+  const getText = u => timed(u, 'text');
+  const plain = h => h ? new DOMParser().parseFromString(h, 'text/html').body.textContent.replace(/\s+/g, ' ').trim() : '';   // teaser text without any markup
+  const parseRss = xml => [...new DOMParser().parseFromString(xml, 'text/xml').querySelectorAll('item')].map(i => ({
+    t: i.querySelector('title')?.textContent.trim(), u: i.querySelector('link')?.textContent.trim(), x: plain(i.querySelector('description')?.textContent),
+    d: (i.querySelector('pubDate') || i.querySelector('updated'))?.textContent.replace(/ Z$/, ' GMT')}));
+  const viaRss2json = url => async () => (await getJSON('https://api.rss2json.com/v1/api.json?rss_url=' + encodeURIComponent(url))).items
+    .map(i => ({t: i.title, u: i.link, x: plain(i.description), d: i.pubDate && i.pubDate.replace(' ', 'T') + 'Z'}));
+  const viaServer = url => async () => parseRss(await getText('/api/rss?url=' + encodeURIComponent(url)));   // Vercel function in api/rss.js
+  const viaDirect = url => async () => parseRss(await getText(url));
+  const viaProxy = (url, k) => async () => parseRss(await getText(PROXIES[k](url)));
+  const rssRoutes = url => [['server', viaServer(url)], ['direct', viaDirect(url)], ['rss2json', viaRss2json(url)], ...PROXIES.map((_, k) => ['proxy ' + (k + 1), viaProxy(url, k)])];
+  
+  const seg = u => { try { return new URL(u).pathname.split('/')[1] || ''; } catch { return ''; } };
+  
+  function firstWorking(routes, {keep = () => true, max = 10, min = 1, stagger = 1500} = {}) {
+    // Routes start one after another (a later one only starts if earlier ones haven't answered yet); the first good answer wins.
+    return new Promise((resolve, reject) => {
+      const log = []; let best = [], reached = false, pending = routes.length, done = false;
+      routes.forEach(([name, fn], k) => setTimeout(async () => {
+        if (done) return;
+        try {
+          const raw = (await fn()).filter(i => i.t && /^https?:/.test(i.u));
+          if (!raw.length) log.push(name + ': no items');
+          else {
+            reached = true;
+            const items = raw.filter(keep).slice(0, max);
+            if (items.length >= min) { if (!done) { done = true; resolve(items); } return; }
+            if (items.length > best.length) best = items;
+          }
+        } catch (e) { log.push(name + ': ' + e.message); }
+        if (--pending === 0 && !done) { done = true; reached ? resolve(best) : reject(new Error('tried ' + log.join(', '))); }
+      }, k * stagger));
+    });
+  }
+  async function gather(chains, opts, limit, progressive) {   // run several feeds, merge, de-duplicate, newest first
+    const seen = new Set(), items = [], errs = [];
+    const sorted = () => items.slice().sort((a, b) => (+new Date(b.d) || 0) - (+new Date(a.d) || 0)).slice(0, limit);
+    await Promise.all(chains.map(c => firstWorking(c, opts).then(list => {
+      for (const i of list) { const k = i.u.split('?')[0]; if (!seen.has(k)) { seen.add(k); items.push(i); } }
+      if (progressive && items.length) progressive(sorted());   // show headlines as soon as the first feed answers
+    }, e => errs.push(e))));
+    if (!items.length) throw (errs[0] || new Error('no matching stories right now'));
+    return sorted();
+  }
+  
+  // The feed only holds the most recent stories, so matching ones are also remembered in this browser (newest LOG_KEEP).
+  const LOG_KEEP = 30;
+  async function loadNews(el, tstamp, key, chains, opts, what, match = () => true, nothing = 'Nothing to show.') {
+    const box = $(el);
+    const paint = d => newsList(el, d.items.filter(match).slice(0, CFG.newsCount),
+      d.scanned ? `Checked the latest ${d.scanned} entries, back to ${valid(d.since) ? when(d.since) : 'unknown'}` : '', nothing);
+    try {
+      const old = cache.get(key);
+      if (old && !box.querySelector('.news')) { paint(old); $(tstamp).textContent = 'Saved ' + ago(old.t); }   // placeholder until the fresh fetch lands
+      const all = await gather(chains, opts, 500, null);   // everything the feed holds, newest first
+      const seen = new Set();
+      const items = [...all.filter(match), ...(old ? old.items.filter(match) : [])].filter(i => !seen.has(i.u) && seen.add(i.u))
+        .sort((a, b) => (+new Date(b.d) || 0) - (+new Date(a.d) || 0)).slice(0, LOG_KEEP);
+      const d = {items, scanned: all.length, since: all[all.length - 1].d, t: Date.now()};
+      paint(d); cache.set(key, d); stamp(tstamp);
+    } catch (e) {
+      if (box.querySelector('.news')) $(tstamp).textContent = 'Update failed, showing older news';
+      else fail(el, what, e);
+    }
+  }
+  
+  // Show one story at a time, rotating through the list; longer ones stay up longer (5 to 12 seconds)
+  const dwell = it => Math.min(12000, Math.max(5000, 3000 + (it.t.length + (it.x || '').length) * 40));
+  const valid = d => d && !isNaN(new Date(d));
+  const feeds = {};   // per panel: what is showing and when it rotates next
+  const newsList = (el, items, note = '', empty = '') => {
+    const f = feeds[el] || (feeds[el] = {i: 0}), sig = items.map(i => i.u + '|' + i.t + '|' + i.x).join('\n');
+    const same = items.length && f.sig === sig && $(el).querySelector('.news');
+    Object.assign(f, {items, note, empty, sig});
+    const paint = k => {   // draw message k, or the "nothing found" note
+      if (!f.items.length) { $(el).innerHTML = `<div class="news empty"><div class="desc">${esc(f.empty)}</div><div class="meta">${esc(f.note)}</div></div>`; return null; }
+      const it = f.items[k], old = valid(it.d) && Date.now() - new Date(it.d) > 864e5;
+      $(el).innerHTML = `<ol class="news"><li>
+        <div class="when${old ? ' old' : ''}">${valid(it.d) ? esc(when(it.d)) + ' · ' + esc(ago(it.d)) : 'time unknown'}</div>
+        <a href="${esc(it.u)}" target="_blank" rel="noopener">${esc(it.t)}</a>
+        ${it.x ? `<div class="desc">${esc(it.x)}</div>` : ''}
+        <div class="meta">${k + 1}/${f.items.length}${f.note ? ' · ' + esc(f.note) : ''}</div></li></ol>`;
+      return it;
+    };
+    if (same) { paint(Math.max(f.i - 1, 0) % f.items.length); return; }   // same messages: redraw the current one (fresh age and note); the rotation carries on
+    clearTimeout(f.timer); f.i = 0;
+    const next = () => {
+      const it = paint(f.i % (f.items.length || 1)); f.i++;
+      if (it) f.timer = setTimeout(next, f.items.length > 1 ? dwell(it) : 3e4);   // a single message is redrawn now and then so its age stays right
+    };
+    next();
+  };
+  
+  // Only Oslo stories that mention one of CFG.newsWords. Matching ignores case and accents; the feed only carries headline and teaser, so only those are searched.
+  const norm = s => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const mentions = it => { const text = norm(it.t + ' ' + (it.x || '')); return CFG.newsWords.some(w => text.includes(norm(w))); };
+  const loadAftenposten = () => loadNews('#ap', '#ap-t', 'oslo-matches', [CFG.apRss, CFG.apRss + '?kat=oslo'].map(rssRoutes),
+    {keep: i => CFG.apSections.includes(seg(i.u)), max: 100, min: Math.min(3, CFG.newsCount)}, 'Oslo news', mentions,
+    `Nothing mentioning ${CFG.newsWords.join(', ').replace(/, ([^,]*)$/, ' or $1')} in the Oslo news feed or saved earlier.`);
+  
+  
+  // ---- Disruptions: Ruter and Vy publish them through Entur's open API ----
+  const EN = 'https://api.entur.io/journey-planner/v3/graphql';
+  const CLIENT = {'ET-Client-Name': 'personal-oslo-dashboard'};
+  async function gql(query, variables) {
+    const r = await fetchT(EN, {method: 'POST', headers: {'Content-Type': 'application/json', ...CLIENT}, body: JSON.stringify({query, variables})});
+    const j = await r.json();
+    if (!j.data) throw new Error(j.errors?.[0]?.message || 'HTTP ' + r.status);
+    return j.data;
+  }
+  const SIT = 'fragment S on PtSituationElement{situationNumber severity summary{value language}description{value language}advice{value language}validityPeriod{startTime endTime}infoLinks{uri}}';
+  const Q_BUS = `query($c:String!){lines(publicCode:$c){publicCode authority{id name}situations{...S}}}${SIT}`;
+  const Q_ST = `query($id:String!){stopPlace(id:$id){name situations{...S}
+    estimatedCalls(numberOfDepartures:25,timeRange:86400,whiteListedModes:[rail],includeCancelledTrips:true){
+      aimedDepartureTime expectedDepartureTime cancellation destinationDisplay{frontText} situations{...S}
+      serviceJourney{situations{...S} line{publicCode authority{id name}situations{...S}}}}}}${SIT}`;
+  
+  const stationShort = () => CFG.station.replace(/ stasjon$/i, '');
+  async function stationId() {
+    if (CFG.stationId) return CFG.stationId;
+    const r = await fetchT('https://api.entur.io/geocoder/v1/autocomplete?size=5&layers=venue&text=' + encodeURIComponent(CFG.station), {headers: CLIENT});
+    const f = (await r.json()).features || [], stop = x => /StopPlace/.test(x.properties.id), want = stationShort().toLowerCase();
+    const hit = f.find(x => stop(x) && /rail/i.test([].concat(x.properties.category || []).join())) || f.find(x => stop(x) && (x.properties.name || '').toLowerCase().includes(want));
+    if (!hit) throw new Error('station not found');
+    return CFG.stationId = hit.properties.id;
+  }
+  
+  const pick = a => ((a || []).find(x => x.language === 'en') || (a || []).find(x => /^(no|nb)/.test(x.language)) || (a || [])[0] || {}).value || '';
+  const RANK = {verySevere: 0, severe: 1, normal: 2, slight: 3, verySlight: 4};
+  const sevCls = s => RANK[s] <= 1 ? 'bad' : RANK[s] <= 3 ? 'warn' : '';
+  function notices(list, src) {
+    const seen = new Set(), now = Date.now(), out = [];
+    for (const s of list) {
+      if (!s || seen.has(s.situationNumber)) continue;
+      seen.add(s.situationNumber);
+      const vp = s.validityPeriod || {};
+      if (vp.endTime && new Date(vp.endTime) < now) continue;       // already over
+      if (vp.startTime && new Date(vp.startTime) > now) continue;   // not started yet, so not an active notice
+      out.push({id: s.situationNumber || pick(s.summary), sev: s.severity, sum: pick(s.summary), desc: pick(s.description), adv: pick(s.advice), from: vp.startTime, to: vp.endTime, src, link: s.infoLinks?.[0]?.uri});
+    }
+    return out.sort((a, b) => (RANK[a.sev] ?? 9) - (RANK[b.sev] ?? 9));
+  }
+  const noteHTML = n => `<details class="note ${sevCls(n.sev)}" data-id="${esc(n.id)}" open><summary>${esc(n.sum || 'Traffic notice')}</summary><div class="body">
+    ${n.desc ? `<p>${esc(n.desc)}</p>` : ''}${n.adv ? `<p><b>Advice:</b> ${esc(n.adv)}</p>` : ''}
+    <p class="meta">${esc(n.src)}${n.from ? ', from ' + fD(n.from) + ' ' + fT(n.from) : ''}${n.to ? ' until ' + fD(n.to) + ' ' + fT(n.to) : ''}${n.link && /^https?:/.test(n.link) ? ` <a href="${esc(n.link)}" target="_blank" rel="noopener">Details</a>` : ''}</p></div></details>`;
+  const chip = list => !list.length ? '<span class="chip ok">No disruptions</span>'
+    : `<span class="chip ${list.some(n => sevCls(n.sev) === 'bad') ? 'bad' : 'warn'}">${list.length} notice${list.length > 1 ? 's' : ''}</span>`;
+  const group = (title, list, board = '') => `<div class="grp"><h3>${title} ${chip(list)}</h3>${board}${list.map(noteHTML).join('')}</div>`;   // departures first, then the notices
+  
+  // Departure boards (trains and bus): kept as data and redrawn every minute, so departures that have gone drop off between refreshes.
+  const boards = {
+    train: {calls: [], err: '', empty: 'No departures in the next 24 hours.'},
+    bus: {calls: [], err: '', empty: '', name: ''}
+  };
+  const depsHTML = key => {
+    const b = boards[key], now = Date.now();
+    const rows = b.calls.filter(c => new Date(c.expectedDepartureTime) > now).slice(0, 5).map(c => {
+      const delay = Math.round((new Date(c.expectedDepartureTime) - new Date(c.aimedDepartureTime)) / 6e4);
+      const tag = c.cancellation ? '<span class="tag bad">Cancelled</span>' : delay >= 2 ? `<span class="tag warn">+${delay} min</span>` : '';
+      return `<li><time>${fT(c.expectedDepartureTime)}</time><span>${esc(c.serviceJourney?.line?.publicCode || '')} to ${esc(c.destinationDisplay?.frontText || '')}</span>${tag}</li>`;
+    }).join('');
+    return (rows ? `<ul class="deps">${rows}</ul>` : b.empty ? `<p class="meta">${esc(b.empty)}</p>` : '') + (b.err ? `<p class="err">Departures not updated: ${esc(b.err)}</p>` : '');
+  };
+  const renderDeps = () => { for (const k in boards) { const el = $('#deps-' + k); if (el) el.innerHTML = depsHTML(k); } };
+  
+  // Bus departures: find the bus stop by name once, then list the next departures of the line (both directions) from it.
+  const Q_BUSDEP = `query($id:String!){stopPlace(id:$id){name
+    estimatedCalls(numberOfDepartures:60,timeRange:7200,whiteListedModes:[bus],includeCancelledTrips:true){
+      aimedDepartureTime expectedDepartureTime cancellation destinationDisplay{frontText} serviceJourney{line{publicCode}}}}}`;
+  let busIds = null;
+  async function busStopIds() {
+    if (CFG.busStopId) return [].concat(CFG.busStopId);
+    if (busIds) return busIds;
+    const text = CFG.busStop || CFG.station, want = text.replace(/ stasjon$/i, '').toLowerCase();
+    const r = await fetchT('https://api.entur.io/geocoder/v1/autocomplete?size=10&layers=venue&text=' + encodeURIComponent(text), {headers: CLIENT});
+    const hits = ((await r.json()).features || []).filter(x => /StopPlace/.test(x.properties.id) && /bus/i.test([].concat(x.properties.category || []).join())
+      && (x.properties.name || '').toLowerCase().includes(want));
+    if (!hits.length) throw new Error(`no bus stop found for "${text}" (set CFG.busStop or CFG.busStopId)`);
+    return busIds = hits.slice(0, 3).map(x => x.properties.id);
+  }
+  async function loadBusDeps() {   // never throws: a problem is shown under the bus group and the old list is kept
+    const b = boards.bus;
+    try {
+      const places = (await Promise.all((await busStopIds()).map(id => gql(Q_BUSDEP, {id})))).map(d => d.stopPlace).filter(Boolean);
+      if (!places.length) throw new Error('bus stop not found');
+      const code = CFG.bus.toLowerCase(), toward = norm(CFG.busTowards);
+      const mine = places.flatMap(p => p.estimatedCalls || []).filter(c => (c.serviceJourney?.line?.publicCode || '').toLowerCase() === code);
+      b.calls = mine.filter(c => norm(c.destinationDisplay?.frontText).includes(toward))   // only the direction you want (empty setting = both)
+        .sort((x, y) => new Date(x.expectedDepartureTime) - new Date(y.expectedDepartureTime)).slice(0, 12);
+      const dests = [...new Set(mine.map(c => c.destinationDisplay?.frontText).filter(Boolean))];
+      b.empty = mine.length && !b.calls.length ? `${CFG.bus} goes from here to ${dests.join(', ')}, not ${CFG.busTowards} (check CFG.busTowards).`
+        : `No ${CFG.bus}${CFG.busTowards ? ' towards ' + CFG.busTowards : ''} departures in the next 2 hours.`;
+      b.name = places[0].name; b.err = '';
+    } catch (e) { b.err = e.message; }
+  }
+  
+  const prevTr = {};   // last good result per group, reused when a refresh fails
+  async function loadTransport() {
+    let stale = 0;   // oldest time (ms) of any group shown from an earlier refresh
+    const run = async (key, title, fn, extra = '') => {
+      try { const r = await fn(); if (!r.failed) prevTr[key] = {...r, at: Date.now()}; return r; }
+      catch (e) {
+        const p = prevTr[key];
+        if (p) { stale = stale ? Math.min(stale, p.at) : p.at; return p; }
+        return {list: [], failed: true, html: `<div class="grp"><h3>${title}</h3><p class="err">Couldn’t load (${esc(e.message)}).</p>${extra}</div>`};
+      }
+    };
+  
+    const busBoard = '<div id="deps-bus"></div>';
+    await loadBusDeps();
+    const bus = await run('bus', `Bus ${esc(CFG.bus)}`, async () => {   // Bus line (Ruter)
+      const lines = (await gql(Q_BUS, {c: CFG.bus})).lines || [];
+      const ruter = lines.filter(l => /RUT/i.test(l.authority?.id || ''));
+      const used = ruter.length ? ruter : lines;
+      if (!used.length) return {list: [], failed: true, html: `<div class="grp"><h3>Bus ${esc(CFG.bus)}</h3><p class="err">Line not found.</p>${busBoard}</div>`};
+      const list = notices(used.flatMap(l => l.situations || []), 'Ruter');
+      return {list, html: group(`Bus ${esc(CFG.bus)}${boards.bus.name ? ' from ' + esc(boards.bus.name) : ''}`, list, busBoard)};
+    }, busBoard);
+  
+    const train = await run('train', `Trains from ${esc(stationShort())}`, async () => {   // Trains (Vy)
+      const sp = (await gql(Q_ST, {id: await stationId()})).stopPlace;
+      if (!sp) throw new Error('station not found');
+      const calls = sp.estimatedCalls || [];
+      const all = [...(sp.situations || []), ...calls.flatMap(c => [...(c.situations || []), ...(c.serviceJourney?.situations || []), ...(c.serviceJourney?.line?.situations || [])])];
+      const org = calls.find(c => c.serviceJourney?.line?.authority)?.serviceJourney.line.authority.name || 'Vy';
+      const list = notices(all, org);
+      boards.train.calls = calls;
+      return {list, html: group(`Trains from ${esc(sp.name)}`, list, '<div id="deps-train"></div>')};
+    });
+  
+    const found = [...bus.list, ...train.list], failed = bus.failed || train.failed;
+    const bad = found.some(n => sevCls(n.sev) === 'bad');
+    const st = found.length ? [bad ? 'bad' : 'warn', `${found.length} active notice${found.length > 1 ? 's' : ''}`] : failed ? ['warn', 'Status incomplete'] : ['ok', 'All clear'];
+    render($('#tr'), `<div class="status ${st[0]}"><b>${st[1]}</b><span>Bus ${esc(CFG.bus)} and trains from ${esc(stationShort())}</span></div>` + bus.html + train.html);
+    renderDeps();
+    if (stale) $('#tr-t').textContent = 'Update failed, showing ' + fT(stale) + ' data'; else stamp('#tr-t');
+  }
+  
+  // ---- Start and refresh ----
+  const loaders = {weather: [loadWeather], transport: [loadTransport], news: [loadAftenposten]};
+  // A loader that is still running ignores new triggers (timer, wake-up, button), unless it has hung for over a minute.
+  const once = fn => { let t0 = 0; return async () => { if (t0 && Date.now() - t0 < 6e4) return; const me = t0 = Date.now(); try { await fn(); } finally { if (t0 === me) t0 = 0; } }; };
+  const jobs = Object.values(loaders).flat().map(once);
+  const runAll = () => jobs.forEach(f => f());
+  const minute = () => { tick(); renderDeps(); };   // clock and departure board
+  const clockLoop = () => { minute(); clockTimer = setTimeout(clockLoop, 6e4 - Date.now() % 6e4 + 50); };   // fires just after each minute starts
+  refreshTimer = setInterval(runAll, CFG.refreshMin * 6e4);
+  const onVisibilityChange = () => { if (!document.hidden) { minute(); runAll(); } };
+  document.addEventListener('visibilitychange', onVisibilityChange);   // catch up after the tab or phone wakes
+  clockLoop(); runAll();
+  const refreshButton = $('#refresh');
+  refreshButton.addEventListener('click', runAll);
+  
+  // ---- Phones: wide desktop-style viewport in landscape, narrower in portrait so the stacked rows stay readable ----
+  const vp = document.querySelector('meta[name=viewport]');
+  function fitViewport() {
+    const portrait = screen.orientation ? /portrait/.test(screen.orientation.type)
+      : window.orientation !== undefined ? Math.abs(window.orientation) !== 90 : innerHeight > innerWidth;
+    vp.content = 'width=' + (portrait ? CFG.portraitWidth : CFG.landscapeWidth);
+  }
+  fitViewport();
+  const onOrientationChange = fitViewport;
+  window.addEventListener('orientationchange', onOrientationChange);
+  const orientation = screen.orientation;
+  orientation?.addEventListener('change', onOrientationChange);
+
+  return () => {
+    clearInterval(refreshTimer);
+    clearTimeout(clockTimer);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    refreshButton.removeEventListener('click', runAll);
+    window.removeEventListener('orientationchange', onOrientationChange);
+    orientation?.removeEventListener('change', onOrientationChange);
+    Object.values(feeds).forEach(feed => clearTimeout(feed.timer));
+  };
+}
